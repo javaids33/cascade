@@ -1,0 +1,18 @@
+{
+  "_name": "replication",
+  "converged": true,
+  "delta": 2000,
+  "incremental_pull_bytes": 1415886,
+  "incremental_pull_sec": 0.3,
+  "incremental_push_bytes": 2914709,
+  "incremental_push_sec": 0.198,
+  "master_ingest_rows_per_sec": 72842,
+  "master_ingest_sec": 0.247,
+  "master_push_bytes_sent": 26247801,
+  "master_push_sec": 1.681,
+  "n_initial": 18000,
+  "replica_bootstrap_bytes_recv": 12377558,
+  "replica_bootstrap_pull_sec": 1.213,
+  "replica_rows_after_bootstrap": 18000,
+  "replica_rows_after_delta": 20000
+}

@@ -1,0 +1,21 @@
+{
+  "_name": "cdc_overhead",
+  "batch": 5000,
+  "cdc_off": {
+    "cdc_rows": 0,
+    "db_bytes": 34385920,
+    "rows": 50000,
+    "rows_per_sec": 307333,
+    "seconds": 0.163
+  },
+  "cdc_on": {
+    "cdc_rows": 50012,
+    "db_bytes": 69058560,
+    "rows": 50000,
+    "rows_per_sec": 172956,
+    "seconds": 0.289
+  },
+  "limit": 50000,
+  "storage_amplification_x": 2.01,
+  "throughput_overhead_pct": 43.7
+}

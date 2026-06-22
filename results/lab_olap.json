@@ -1,0 +1,15 @@
+{
+  "_name": "lab_olap",
+  "by_source": [
+    {
+      "count": 12,
+      "source": "wikimedia"
+    }
+  ],
+  "changes_drained": 12,
+  "docs_per_min": 40.0,
+  "duckdb_rows": 12,
+  "event_window_s": 18,
+  "primary_db": "/Users/syedjavaid/claude_projects/turso-edge-olap/.work/db/lab_master.db",
+  "seconds": 0.053
+}

@@ -1,0 +1,17 @@
+# Two-machine REPLICA (a CPU-only edge, e.g. the Mac). Pulls finished vectors and searches locally.
+# Set remote_url to the master's Tailscale/LAN ip.
+[node]
+role = "replica"
+db   = ".work/db/replica.db"
+
+[sync]
+enabled    = true
+remote_url = "http://MASTER_IP:8080"
+
+[embedding]
+url   = "http://localhost:11434"
+model = "all-minilm"
+dim   = 384
+
+[generation]
+model = "qwen2.5:1.5b"

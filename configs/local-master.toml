@@ -1,0 +1,25 @@
+# Local smoke-test MASTER (single machine). The smoke script runs the sync hub separately,
+# so serve = false here. Uses the offline `demo` source for determinism.
+[node]
+role = "master"
+db   = ".work/db/local_master.db"
+
+[sync]
+enabled    = true
+serve      = false                      # the smoke script owns the hub
+remote_url = "http://127.0.0.1:8080"
+push_every = 8
+
+[cdc]
+enabled = true
+
+[embedding]
+url   = "http://localhost:11434"
+model = "all-minilm"
+dim   = 384
+
+[olap]
+duckdb = ".work/olap/local.duckdb"
+
+[source]
+kind = "demo"                           # 6 fixed docs, no network

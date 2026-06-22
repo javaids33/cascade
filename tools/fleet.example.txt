@@ -1,0 +1,8 @@
+# Cascade fleet — copy to tools/fleet.txt and edit. One agent URL per line. The master agent
+# serves this at /fleet, the dashboard auto-loads it, and /fleet-telemetry aggregates them all.
+# Add a line per replica to scale. (tools/fleet.txt is gitignored so your real IPs stay local.)
+#
+# "localhost" is correct when the dashboard/aggregator runs ON the master. To view from another
+# machine, re-run start-master.cmd (opens :7071) and use the master's LAN IP instead.
+http://localhost:7071           # master (GPU producer)
+# http://192.168.1.50:7071      # replica (edge) — add one line per edge node

@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cascade — fleet dashboard</title>
+<style>
+  :root{--bg:#0b0e14;--panel:#141926;--ink:#d7dce5;--mut:#7c879c;--line:#222a3a;
+        --ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
+  header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;letter-spacing:.5px}
+  header .spacer{flex:1}
+  input,button{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+  input{min-width:420px}
+  button{cursor:pointer}
+  .topo{display:flex;gap:10px;align-items:center;padding:10px 16px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+  .chip{display:flex;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+  .arrow{color:var(--mut)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--mut)}
+  .dot.up{background:var(--ok);box-shadow:0 0 8px var(--ok)} .dot.down{background:var(--bad)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px;padding:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h2{margin:0;padding:10px 12px;font-size:13px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
+  .card h2 .role{color:var(--acc);text-transform:uppercase;font-size:11px;letter-spacing:1px}
+  .card h2 .host{color:var(--mut);font-weight:400}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line)}
+  .metric{background:var(--panel);padding:8px 10px}
+  .metric .k{color:var(--mut);font-size:11px} .metric .v{font-size:16px}
+  .metric .v.bad{color:var(--bad)} .metric .v.ok{color:var(--ok)}
+  .sec{padding:8px 12px;border-top:1px solid var(--line)}
+  .sec h3{margin:0 0 6px;font-size:11px;color:var(--mut);letter-spacing:1px;text-transform:uppercase}
+  pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto;font-size:12px;color:#aeb6c4}
+  .log .err{color:var(--bad)} .log .ok{color:var(--ok)} .log .warn{color:var(--warn)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px}
+  .kv b{color:var(--mut);font-weight:400}
+  .err-badge{color:var(--bad)} .muted{color:var(--mut)}
+  /* communication / flow panel */
+  .comms{margin:14px 16px 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .stage{flex:1;min-width:200px;padding:10px 14px}
+  .stage h4{margin:0 0 6px;font-size:11px;letter-spacing:1px;color:var(--mut);text-transform:uppercase}
+  .stage .big{font-size:22px}
+  .stage .sub{color:var(--mut);font-size:12px}
+  .pipe{display:flex;flex-direction:column;justify-content:center;align-items:center;color:var(--mut);min-width:120px}
+  .pipe .lbl{font-size:11px} .pipe .ln{font-size:20px;letter-spacing:2px}
+  .pipe.live .ln{color:var(--ok)} .pipe.stale .ln{color:var(--warn)} .pipe.bad .ln{color:var(--bad)}
+  .verdict{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:13px}
+  .verdict.ok{color:var(--ok)} .verdict.warn{color:var(--warn)} .verdict.bad{color:var(--bad)}
+</style>
+</head>
+<body>
+<header>
+  <h1>⛰ CASCADE — fleet dashboard</h1>
+  <span class="spacer"></span>
+  <input id="nodes" placeholder="agent URLs, comma-separated e.g. http://localhost:7071,http://192.168.1.50:7071">
+  <button onclick="save()">apply</button>
+  <span id="clock" class="muted"></span>
+</header>
+<div id="topo" class="topo"></div>
+<div id="comms" class="comms"></div>
+<div id="grid" class="grid"></div>
+
+<script>
+// When served by an agent (http://<node>:7071/), default to that node's own origin so opening any
+// node's URL shows the dashboard pre-pointed at it. Otherwise fall back to the local master agent.
+const ORIGIN = location.protocol.startsWith("http") ? location.origin : "";
+const DEFAULT = (ORIGIN && location.port && location.port !== "8090") ? ORIGIN : "http://localhost:7071";
+const uniq = a => [...new Set(a)];
+let nodes = uniq((new URLSearchParams(location.search).get("nodes")
+            || localStorage.getItem("cascade_nodes") || DEFAULT)
+            .split(",").map(s=>s.trim()).filter(Boolean));
+const setBox = () => { document.getElementById("nodes").value = nodes.join(","); };
+setBox();
+function save(){
+  nodes = uniq(document.getElementById("nodes").value.split(",").map(s=>s.trim()).filter(Boolean));
+  localStorage.setItem("cascade_nodes", nodes.join(","));
+  setBox(); render();
+}
+// Auto-discover the rest of the fleet from the serving node's /fleet (so adding a line to
+// tools/fleet.txt makes every node appear without editing each viewer).
+async function loadFleet(){
+  if(!ORIGIN) return;
+  try{
+    const r = await fetch(ORIGIN.replace(/\/$/,"")+"/fleet",{cache:"no-store"});
+    if(r.ok){ const d = await r.json();
+      if(Array.isArray(d.nodes) && d.nodes.length){ nodes = uniq(nodes.concat(d.nodes)); setBox(); } }
+  }catch(e){}
+}
+const esc = s => (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function logClass(l){
+  if(/ERROR|push failed|put failed|connect failed|stream dropped|Error:|not reachable|panic/i.test(l)) return "err";
+  if(/\(pushed\)|up\b|reachable|Sources|retrieval/i.test(l)) return "ok";
+  if(/reconnect|retry|WARN/i.test(l)) return "warn";
+  return "";
+}
+async function fetchOne(url){
+  try{
+    const r = await fetch(url.replace(/\/$/,"")+"/telemetry",{cache:"no-store"});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const d = await r.json(); d.__url=url; d.__ok=true; return d;
+  }catch(e){ return {__url:url, __ok:false, __err:String(e)}; }
+}
+function cfgSummary(c){
+  const p=(c&&c.parsed)||{}, n=p.node||{}, s=p.sync||{}, e=p.embedding||{}, src=p.source||{};
+  return {role:n.role, db:n.db, remote:s.remote_url, bind:s.bind, serve:s.serve,
+          model:e.model, dim:e.dim, source:src.kind};
+}
+function topoChip(d){
+  const up = d.__ok && d.up;
+  const role = d.__ok ? (d.role||"node") : "?";
+  const host = d.__ok ? d.host : d.__url;
+  return `<div class="chip"><span class="dot ${d.__ok?(up?"up":"down"):"down"}"></span>
+    <span><b>${esc(role)}</b><br><span class="muted">${esc(host)}</span></span></div>`;
+}
+function metricCells(d){
+  const m=d.metrics||{};
+  if(d.role==="replica"){
+    return [
+      ["searches", m.searches||0, ""],
+      ["last retrieval", m.last_retrieval_ms!=null?m.last_retrieval_ms+"ms":"—", "ok"],
+      ["last pull", m.last_pull_changed||"—", ""],
+      ["errors", (d.errors||[]).length, (d.errors||[]).length?"bad":""],
+    ];
+  }
+  return [
+    ["stored/embedded", m.stored??0, ""],
+    ["rate", (m.rate_per_s??0)+"/s", ""],
+    ["pushed", m.pushed_batches??0, "ok"],
+    ["push failed", m.push_failed??0, m.push_failed?"bad":""],
+    ["put failed", m.put_failed??0, m.put_failed?"bad":""],
+    ["reconnects", m.reconnects??0, m.reconnects?"warn":""],
+  ];
+}
+// The communication panel: master --push--> hub :8080 --pull--> replicas, with live health.
+function renderComms(data){
+  const M=data.filter(d=>d.__ok&&d.role==="master");
+  const R=data.filter(d=>d.__ok&&d.role==="replica");
+  const m=M[0]?(M[0].metrics||{}):{};
+  const pushing = (m.pushed_batches||0)>0;
+  const pushBad = (m.push_failed||0)>0;
+  const searches = R.reduce((a,r)=>a+((r.metrics||{}).searches||0),0);
+  const replicaUp = R.some(r=>r.up);
+  const lastRet = R.map(r=>(r.metrics||{}).last_retrieval_ms).filter(x=>x!=null).pop();
+  const anyErr = data.some(d=>d.__ok&&(d.errors||[]).length>0);
+  const pushCls = pushBad?"bad":(pushing?(M[0]&&M[0].up?"live":"stale"):"stale");
+  const pullCls = R.length? (replicaUp?"live":"stale") : "stale";
+  let verdict, vcls;
+  if(!M.length){ verdict="No master online."; vcls="bad"; }
+  else if(pushBad){ verdict=`⚠ master pushing but ${m.push_failed} push(es) failed — vectors may be lossy (turso F32_BLOB sync quirk).`; vcls="warn"; }
+  else if(!R.length){ verdict="✓ master embedding+pushing. No replica connected yet — start one and add its agent URL."; vcls="warn"; }
+  else if(pushing && searches>0){ verdict=`✓ end-to-end healthy: master pushed ${m.pushed_batches} batches, ${R.length} replica(s) ran ${searches} search(es)${lastRet!=null?` (last ${lastRet}ms)`:""}.`; vcls="ok"; }
+  else if(pushing){ verdict=`✓ master pushing (${m.pushed_batches} batches); replica connected but no searches yet — run one on the edge.`; vcls="warn"; }
+  else { verdict="Master online but not pushing yet."; vcls="warn"; }
+  return `<div class="flow">
+    <div class="stage"><h4>master (producer)</h4>
+      <div class="big">${m.stored??0}</div><div class="sub">embedded · ${m.rate_per_s??0}/s</div></div>
+    <div class="pipe ${pushCls}"><div class="lbl">push</div><div class="ln">━━▶</div>
+      <div class="lbl">${m.pushed_batches??0} batches${pushBad?` · ${m.push_failed} fail`:""}</div></div>
+    <div class="stage"><h4>sync hub :8080</h4>
+      <div class="big">${M[0]&&M[0].up?"●":"○"}</div><div class="sub">${M.length} master · ${R.length} replica</div></div>
+    <div class="pipe ${pullCls}"><div class="lbl">pull + search</div><div class="ln">━━▶</div>
+      <div class="lbl">${searches} search(es)</div></div>
+    <div class="stage"><h4>replicas (edge)</h4>
+      <div class="big">${R.length}</div><div class="sub">${lastRet!=null?`last query ${lastRet}ms`:"no queries yet"}</div></div>
+  </div>
+  <div class="verdict ${vcls}">${verdict}</div>`;
+}
+function card(d){
+  if(!d.__ok){
+    return `<div class="card"><h2><span class="role">offline</span>
+      <span class="host">${esc(d.__url)}</span></h2>
+      <div class="sec err-badge">unreachable — ${esc(d.__err)}</div></div>`;
+  }
+  const m=d.metrics||{}, c=cfgSummary(d.config);
+  const errors=d.errors||[];
+  const logHtml=(d.recent_log||[]).slice(-60).map(l=>`<span class="${logClass(l)}">${esc(l)}</span>`).join("\n");
+  return `<div class="card">
+    <h2><span class="dot ${d.up?"up":"down"}"></span>
+        <span class="role">${esc(d.role)}</span>
+        <span class="host">${esc(d.host)} · ${esc(d.__url)}</span></h2>
+    <div class="metrics">${metricCells(d).map(c=>
+      `<div class="metric"><div class="k">${c[0]}</div><div class="v ${c[2]||""}">${c[1]}</div></div>`).join("")}</div>
+    <div class="sec"><h3>config (${esc(c.source)} → ${esc(c.model)}/${c.dim})</h3>
+      <div class="kv">
+        <b>role</b><span>${esc(c.role)}</span>
+        <b>db</b><span>${esc(c.db)}</span>
+        <b>sync.bind</b><span>${esc(c.bind||"—")}</span>
+        <b>remote_url</b><span>${esc(c.remote||"—")}</span>
+        <b>serve hub</b><span>${c.serve?"yes":"no"}</span>
+      </div></div>
+    ${errors.length?`<div class="sec"><h3 class="err-badge">errors (${errors.length})</h3>
+      <pre class="log">${errors.map(l=>`<span class="err">${esc(l)}</span>`).join("\n")}</pre></div>`:""}
+    <div class="sec log"><h3>live log</h3><pre class="log">${logHtml||"<span class='muted'>(no log yet)</span>"}</pre></div>
+  </div>`;
+}
+async function render(){
+  const data = await Promise.all(nodes.map(fetchOne));
+  // topology: master(s) -> hub -> replicas, inferred from role
+  const masters=data.filter(d=>d.__ok&&d.role==="master"), replicas=data.filter(d=>d.__ok&&d.role==="replica");
+  const others=data.filter(d=>!d.__ok||(d.role!=="master"&&d.role!=="replica"));
+  let topo = masters.map(topoChip).join("");
+  if(masters.length) topo += `<span class="arrow">— sync hub :8080 →</span>`;
+  topo += replicas.map(topoChip).join("") + others.map(topoChip).join("");
+  document.getElementById("topo").innerHTML = topo || "<span class='muted'>no nodes configured</span>";
+  document.getElementById("comms").innerHTML = renderComms(data);
+  document.getElementById("grid").innerHTML = data.map(card).join("");
+  document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+}
+loadFleet().then(()=>{ render(); setInterval(render, 2000); });
+</script>
+</body>
+</html>

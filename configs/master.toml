@@ -1,0 +1,29 @@
+# Two-machine MASTER (the GPU producer, e.g. PC + 3070). `cascade serve --config configs/master.toml`
+# spawns the sync hub, embeds the Wikimedia firehose, and pushes vectors to replicas.
+[node]
+role = "master"
+db   = ".work/db/master.db"
+
+[sync]
+enabled    = true
+serve      = true                       # spawn tursodb --sync-server as part of serve
+bind       = "0.0.0.0:8080"             # replicas connect to http://<this-ip>:8080
+remote_url = "http://127.0.0.1:8080"
+push_every = 32
+
+[cdc]
+enabled = true
+
+[embedding]
+url   = "http://localhost:11434"
+model = "all-minilm"
+dim   = 384
+
+[olap]
+duckdb = ".work/olap/master.duckdb"
+
+[source]
+kind      = "wikimedia"
+wiki      = "enwiki"
+namespace = "0"
+max_items = 0                           # 0 = run forever

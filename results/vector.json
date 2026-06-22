@@ -1,0 +1,40 @@
+{
+  "_name": "vector",
+  "db_bytes": 15904768,
+  "dim": 64,
+  "latency_curve": [
+    {
+      "mean_ms": 0.23,
+      "p50_ms": 0.23,
+      "p95_ms": 0.24,
+      "rows": 1000
+    },
+    {
+      "mean_ms": 1.19,
+      "p50_ms": 1.19,
+      "p95_ms": 1.22,
+      "rows": 5000
+    },
+    {
+      "mean_ms": 2.41,
+      "p50_ms": 2.41,
+      "p95_ms": 2.43,
+      "rows": 10000
+    },
+    {
+      "mean_ms": 6.4,
+      "p50_ms": 6.35,
+      "p95_ms": 6.54,
+      "rows": 25000
+    },
+    {
+      "mean_ms": 14.16,
+      "p50_ms": 14.15,
+      "p95_ms": 14.67,
+      "rows": 50000
+    }
+  ],
+  "max_rows": 50000,
+  "note": "linear scan, no ANN index in Turso v0.6.1; latency grows ~linearly with rows",
+  "self_nn_correct": true
+}

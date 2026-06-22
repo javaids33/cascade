@@ -1,0 +1,17 @@
+{
+  "_name": "cdc_to_olap",
+  "batch": 10000,
+  "changes_applied": {
+    "delete": 0,
+    "insert": 50000,
+    "update": 0
+  },
+  "changes_per_sec": 4851,
+  "consistent": true,
+  "duckdb_bytes": 12333056,
+  "duckdb_rows": 50000,
+  "iceberg_rows": 50000,
+  "primary_db": "/Users/syedjavaid/claude_projects/turso-edge-olap/.work/db/cdc_on.db",
+  "seconds": 10.306,
+  "total_changes": 50000
+}

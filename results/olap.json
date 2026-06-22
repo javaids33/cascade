@@ -1,0 +1,37 @@
+{
+  "_name": "olap",
+  "duckdb_bytes": 31207424,
+  "queries": {
+    "Q1_top_assignees": {
+      "duckdb_ms": 2.0,
+      "turso_ms": 5.2,
+      "turso_slower_x": 2.5
+    },
+    "Q2_grants_per_year": {
+      "duckdb_ms": 0.3,
+      "turso_ms": 3.7,
+      "turso_slower_x": 13.8
+    },
+    "Q3_top_cpc_sections": {
+      "duckdb_ms": 1.0,
+      "turso_ms": 88.3,
+      "turso_slower_x": 89.7
+    },
+    "Q4_most_cited": {
+      "duckdb_ms": 13.6,
+      "turso_ms": 170.6,
+      "turso_slower_x": 12.6
+    },
+    "Q5_citations_by_assignee": {
+      "duckdb_ms": 11.4,
+      "turso_ms": 2144.2,
+      "turso_slower_x": 188.6
+    }
+  },
+  "turso_load": {
+    "db_bytes": 253042688,
+    "load_rows_per_sec": 338037,
+    "load_sec": 9.29,
+    "rows_loaded": 3138753
+  }
+}

@@ -1,0 +1,17 @@
+# Local smoke-test REPLICA (same machine, pulls from the local hub). Retrieval-only (no LLM) so
+# the test is deterministic.
+[node]
+role = "replica"
+db   = ".work/db/local_replica.db"
+
+[sync]
+enabled    = true
+remote_url = "http://127.0.0.1:8080"
+
+[embedding]
+url   = "http://localhost:11434"
+model = "all-minilm"
+dim   = 384
+
+[generation]
+model = ""                              # retrieval only — no generation variance in the test
