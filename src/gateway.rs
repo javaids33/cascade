@@ -7,6 +7,7 @@
 //!   POST /put     {id,text,meta?}     -> {ok}                 (master)
 //!   GET  /search?q=...&k=5            -> {hits:[{id,text,meta,score}]}
 //!   POST /drain                       -> OlapStats            (master)
+//!   POST /inbox   {id,src?,payload}   -> {ok}                 (master; edge write-back landing)
 
 use std::sync::Arc;
 
@@ -37,6 +38,7 @@ pub async fn serve(node: Node, bind: &str) -> Result<()> {
         .route("/put", post(put))
         .route("/search", get(search))
         .route("/drain", post(drain))
+        .route("/inbox", post(inbox))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!("cascade gateway ({role}) on http://{bind}");
@@ -83,4 +85,22 @@ async fn drain(State(s): State<Shared>) -> Result<Json<J>, ApiErr> {
     let node = s.lock().await;
     let stats = node.drain_olap().await.map_err(err)?;
     Ok(Json(json!(stats)))
+}
+
+#[derive(Deserialize)]
+struct InboxReq {
+    id: String,
+    #[serde(default)]
+    src: String,
+    payload: J,
+}
+
+async fn inbox(State(s): State<Shared>, Json(req): Json<InboxReq>) -> Result<Json<J>, ApiErr> {
+    let node = s.lock().await;
+    if !node.is_master() {
+        return Err((StatusCode::BAD_REQUEST, "inbox is master-only".to_string()));
+    }
+    node.ingest_inbox(&req.id, &req.src, &req.payload).await.map_err(err)?;
+    node.push().await.map_err(err)?; // replicate the write-back out to edges
+    Ok(Json(json!({ "ok": true, "id": req.id })))
 }

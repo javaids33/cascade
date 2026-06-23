@@ -7,7 +7,9 @@
 mod cdc_overhead;
 mod cdc_to_olap;
 mod common;
+mod compare;
 mod gen_synthetic;
+mod index;
 mod olap;
 mod prep_data;
 mod replication;
@@ -56,6 +58,22 @@ enum Cmd {
         #[arg(long, default_value = "node.toml")]
         config: String,
     },
+    /// Master: prune the turso_cdc change log (keeps it bounded on a long-running node).
+    Prune {
+        #[arg(long, default_value = "node.toml")]
+        config: String,
+    },
+    /// Replica: queue a JSON payload in the local write-back outbox (ship later with `flush`).
+    Enqueue {
+        payload: String,
+        #[arg(long, default_value = "node.toml")]
+        config: String,
+    },
+    /// Replica: ship the write-back outbox to the master's gateway /inbox ([sync] writeback_url).
+    Flush {
+        #[arg(long, default_value = "node.toml")]
+        config: String,
+    },
     /// Expose the node over a local HTTP API for clients in any language (Python/JS/Go).
     Gateway {
         #[arg(long, default_value = "node.toml")]
@@ -71,6 +89,8 @@ enum Cmd {
     PrepData { path: Option<String>, limit: Option<usize> },
     /// CDC capture overhead (CDC off vs on).
     CdcOverhead { limit: Option<usize> },
+    /// Competitor comparison: built-in CDC vs the hand-rolled SQLite trigger pattern vs none.
+    CompareCdc { limit: Option<usize> },
     /// Drain turso_cdc -> DuckDB + Iceberg (patents schema).
     CdcToOlap { primary: Option<String> },
     /// Master->replica native replication (needs a sync server).
@@ -82,7 +102,12 @@ enum Cmd {
     /// Synthesize results/*.json -> docs/REPORT.md.
     Report,
     /// Run every benchmark phase end to end (spawns a sync server).
-    RunAll { n: Option<usize> },
+    RunAll {
+        n: Option<usize>,
+        /// Archive this run's results under results/<run-id>/ (default: run-<unix-ts>).
+        #[arg(long)]
+        run_id: Option<String>,
+    },
 }
 
 fn tursodb_search_dirs() -> Vec<PathBuf> {
@@ -140,9 +165,7 @@ async fn cmd_search(query: &str, k: Option<usize>, config: &str) -> Result<()> {
     let node = Node::open(cfg.clone()).await?;
     let changed = node.pull().await.unwrap_or(false);
     let k = k.unwrap_or(5);
-    let t = std::time::Instant::now();
-    let hits = node.search(query, k).await?;
-    let retrieval_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let (hits, embed_ms, scan_ms) = node.search_timed(query, k).await?;
     if hits.is_empty() {
         println!("no documents yet (pulled changed={changed}). Run a master `cascade serve` and let it sync.");
         return Ok(());
@@ -157,7 +180,11 @@ async fn cmd_search(query: &str, k: Option<usize>, config: &str) -> Result<()> {
         let url = h.meta.get("url").and_then(|x| x.as_str()).unwrap_or("");
         println!("  [{}] (cos_dist={:.3}) {}  {}", i + 1, h.score, title, url);
     }
-    println!("\n[retrieval] {retrieval_ms:.1}ms  (local, co-located vector search)");
+    println!(
+        "\n[retrieval] scan {scan_ms:.1}ms (co-located vector search, local) + embed {embed_ms:.1}ms \
+         (query round-trip to Ollama) = {:.1}ms total",
+        embed_ms + scan_ms
+    );
     Ok(())
 }
 
@@ -166,8 +193,41 @@ async fn cmd_drain(config: &str) -> Result<()> {
     let node = Node::open(cfg).await?;
     let st = node.drain_olap().await?;
     println!("drained {} changes -> {} ({} rows) in {:.2}s", st.changes, st.duckdb_path, st.duckdb_rows, st.seconds);
-    let summary = Node::olap_summary(&st.duckdb_path)?;
-    println!("{}", serde_json::to_string_pretty(&summary)?);
+    if !st.duckdb_path.is_empty() {
+        let summary = Node::olap_summary(&st.duckdb_path)?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    }
+    Ok(())
+}
+
+async fn cmd_prune(config: &str) -> Result<()> {
+    let cfg = Config::from_path(config)?;
+    let node = Node::open(cfg).await?;
+    let n = node.prune_cdc(None).await?;
+    println!("pruned {n} turso_cdc rows");
+    Ok(())
+}
+
+async fn cmd_enqueue(payload: &str, config: &str) -> Result<()> {
+    let cfg = Config::from_path(config)?;
+    let node = Node::open(cfg).await?;
+    let p: serde_json::Value =
+        serde_json::from_str(payload).unwrap_or_else(|_| serde_json::Value::String(payload.to_string()));
+    node.enqueue(&p).await?;
+    println!("enqueued 1 row to the write-back outbox (ship with `cascade flush`)");
+    Ok(())
+}
+
+async fn cmd_flush(config: &str) -> Result<()> {
+    let cfg = Config::from_path(config)?;
+    let url = cfg
+        .sync
+        .writeback_url
+        .clone()
+        .context("set [sync] writeback_url to the master's gateway URL (e.g. http://MASTER_IP:7070)")?;
+    let node = Node::open(cfg).await?;
+    let n = node.flush_outbox(&url).await?;
+    println!("flushed {n} outbox row(s) -> {url}/inbox");
     Ok(())
 }
 
@@ -177,8 +237,20 @@ fn step(msg: &str) {
     println!("\n==================== {msg} ====================");
 }
 
-async fn run_all(n: Option<usize>) -> Result<()> {
+async fn run_all(n: Option<usize>, run_id: Option<String>) -> Result<()> {
     common::ensure_dirs()?;
+
+    // Stamp a run id so every phase archives a self-consistent baseline under results/<id>/.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let id = run_id
+        .or_else(common::run_id)
+        .unwrap_or_else(|| format!("run-{ts}"));
+    std::env::set_var("CASCADE_RUN_ID", &id);
+
+    let dataset = if common::patents_jsonl().is_some() { "real" } else { "synthetic" };
     if let Some(src) = common::patents_jsonl() {
         step("Phase 1: prep real data from PATENTS_JSONL");
         prep_data::run(&src, None)?;
@@ -189,6 +261,11 @@ async fn run_all(n: Option<usize>) -> Result<()> {
         step(&format!("Phase 1: generate synthetic data (n={synth})"));
         gen_synthetic::run(synth)?;
     }
+    let _ = common::save_result(
+        "run_meta",
+        serde_json::json!({ "run_id": id, "unix_ts": ts, "dataset": dataset, "n": n }),
+    );
+    println!("[run-all] archiving results under results/{id}/");
     step("Phase 3a: CDC overhead");
     cdc_overhead::run(None).await?;
     step("Phase 3b: CDC -> OLAP (DuckDB + Iceberg)");
@@ -224,6 +301,9 @@ async fn main() -> Result<()> {
         Cmd::Serve { config } => cmd_serve(&config).await?,
         Cmd::Search { query, k, config } => cmd_search(&query, k, &config).await?,
         Cmd::Drain { config } => cmd_drain(&config).await?,
+        Cmd::Prune { config } => cmd_prune(&config).await?,
+        Cmd::Enqueue { payload, config } => cmd_enqueue(&payload, &config).await?,
+        Cmd::Flush { config } => cmd_flush(&config).await?,
         Cmd::Gateway { config, bind } => {
             let node = Node::open(Config::from_path(&config)?).await?;
             cascade::gateway::serve(node, &bind).await?;
@@ -242,12 +322,13 @@ async fn main() -> Result<()> {
             prep_data::run(&src, limit)?;
         }
         Cmd::CdcOverhead { limit } => cdc_overhead::run(limit).await?,
+        Cmd::CompareCdc { limit } => compare::run(limit).await?,
         Cmd::CdcToOlap { primary } => cdc_to_olap::run(primary).await?,
         Cmd::Replication { n, delta } => replication::run(n, delta).await?,
         Cmd::Olap => olap::run().await?,
         Cmd::Vector { max_rows, dim } => vector::run(max_rows, dim).await?,
         Cmd::Report => report::run()?,
-        Cmd::RunAll { n } => run_all(n).await?,
+        Cmd::RunAll { n, run_id } => run_all(n, run_id).await?,
     }
     Ok(())
 }

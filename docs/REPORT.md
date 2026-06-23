@@ -31,11 +31,11 @@ The loader tails `turso_cdc` with a `change_id` cursor, decodes before/after ima
 
 | Metric | Value |
 |---|---|
-| Master ingest | 161,142 rows/s |
-| Initial push (45,000) | 1.234s, 63MB |
-| Replica bootstrap pull | **0.067s** → 45,000 rows |
-| Incremental push (5,000) | 0.182s, 7MB |
-| Incremental pull (5,000) | **0.028s**, 3MB |
+| Master ingest | 72,842 rows/s |
+| Initial push (18,000) | 1.681s, 25MB |
+| Replica bootstrap pull | **1.213s** → 18,000 rows |
+| Incremental push (2,000) | 0.198s, 3MB |
+| Incremental pull (2,000) | **0.3s**, 1MB |
 | Converged | true |
 
 ## OLAP lane comparison: DuckDB vs Turso (Phase 4)

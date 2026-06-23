@@ -1,0 +1,45 @@
+name: ci
+
+# Build + the config-contract tests on Linux (the supported build target). No GPU/Ollama needed:
+# the config tests are pure, and the optional smoke job uses the deterministic fake embedder
+# (CASCADE_FAKE_EMBED) so it never calls a model.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable        # >= 1.94 (fastnum floor)
+      - uses: Swatinem/rust-cache@v2               # cache the slow duckdb/iceberg build
+      - name: Build
+        run: cargo build --release --bin cascade
+      - name: Config-contract tests (pure, no infra)
+        run: cargo test --test config_cases
+      - name: Clippy (informational)
+        run: cargo clippy --all-targets || true
+
+  # Optional end-to-end smoke with the fake embedder + the tursodb sync hub. Kept separate so a
+  # flaky download never blocks the core gate. Mirrors ./test.sh but with no Ollama dependency.
+  smoke:
+    runs-on: ubuntu-latest
+    needs: build-test
+    continue-on-error: true
+    env:
+      CASCADE_FAKE_EMBED: "1"
+      CASCADE_EMBED_DIM: "384"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bootstrap (downloads tursodb CLI, builds release)
+        run: ./setup.sh
+      - name: Post-build gate (config + master/replica roles)
+        run: ./test.sh

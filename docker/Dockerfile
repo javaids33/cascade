@@ -1,4 +1,4 @@
-# Multi-stage build for the `teo` harness + the tursodb sync-server CLI.
+# Multi-stage build for the `cascade` binary + the tursodb sync-server CLI.
 # Ollama is NOT in here — it runs on the host (GPU/Metal); containers reach it via
 # host.docker.internal:11434.
 
@@ -7,7 +7,7 @@ WORKDIR /app
 # system deps for the duckdb bundled build (C/C++ toolchain) are already in rust:bookworm
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --bin teo
+RUN cargo build --release --bin cascade
 
 # Fetch the matching tursodb CLI (Linux) for the sync server.
 FROM debian:bookworm-slim AS cli
@@ -25,15 +25,13 @@ RUN set -eux; \
 FROM debian:bookworm-slim
 # libssl3: turso/iceberg/reqwest link OpenSSL (native-tls); ca-certificates: Wikimedia HTTPS stream.
 RUN for i in 1 2 3; do apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates && break || sleep 5; done && rm -rf /var/lib/apt/lists/*
-COPY --from=build /app/target/release/teo /usr/local/bin/teo
+COPY --from=build /app/target/release/cascade /usr/local/bin/cascade
 COPY --from=cli /usr/local/bin/tursodb /usr/local/bin/tursodb
 WORKDIR /work
+# The node commands take `--config configs/<...>.toml`; ship the configs in the image (under /work).
+COPY configs ./configs
 ENV TURSO_EXP_HOME=/work/.work
 ENV TEO_REPO_ROOT=/work
 ENV TURSODB=/usr/local/bin/tursodb
-# Ollama on the host:
-ENV OLLAMA_URL=http://host.docker.internal:11434
-ENV EMBED_MODEL=all-minilm
-ENV EMBED_DIM=384
-ENTRYPOINT ["teo"]
+ENTRYPOINT ["cascade"]
 CMD ["--help"]

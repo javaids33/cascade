@@ -6,14 +6,16 @@ make a pattern clearer, more honest, or easier to onboard to are very welcome �
 - **New patterns** (a slice of infra Turso collapses) — add a section to [`PATTERNS.md`](PATTERNS.md)
   and a `cascade` subcommand that demonstrates it with a measurable result.
 - **Competitor comparisons** — stand up the heavy stack a pattern replaces (Postgres+Debezium,
-  pgvector, Litestream, …) and put real numbers next to ours. This is the most-wanted contribution.
-- **Data sources** for the live lab (`src/ingest.rs`) — any open, streaming feed.
+  pgvector, Litestream, …) and put real numbers next to ours. Start from [`docker/compare/`](docker/compare/)
+  (Postgres+Debezium + SQLite+Litestream harnesses) and `cascade compare-cdc` (same-engine baseline).
+  Validating those on Linux and quoting the numbers is the most-wanted contribution.
+- **Data sources** for the live lab (`src/source.rs`) — any open, streaming feed.
 - **Honesty fixes** — if a claim overstates, correct it. We'd rather be right than impressive.
 
 ## Dev setup (5 minutes)
 
 ```bash
-# Rust >= 1.92, then:
+# Rust >= 1.94, then:
 ./setup.sh                 # downloads the tursodb CLI + cargo build --release
 cargo build                # debug build for iterating
 ./target/debug/cascade --help
@@ -38,7 +40,7 @@ src/
   main.rs        clap CLI: one subcommand per phase/pattern
   common.rs      paths/env, Parquet IO, turso<->arrow, results JSON
   <phase>.rs     gen_synthetic, prep_data, cdc_overhead, cdc_to_olap, replication, olap, vector, report
-  ingest.rs rag.rs lab_olap.rs ollama.rs labdb.rs   # the live "Living Knowledge Base" lab
+  config.rs node.rs source.rs ollama.rs gateway.rs sync_server.rs  # the live lab (serve/search/drain)
 docker/          Dockerfile + compose for master/edge
 PATTERNS.md      the catalog (start here)
 LAB.md           the two-machine lab guide
@@ -51,7 +53,7 @@ CLAUDE.md        build internals, crate gotchas, known gaps
    `common::save_result("<name>", json!({...}))`.
 2. Wire a subcommand in `src/main.rs`.
 3. Add a `PATTERNS.md` section: **Replaces / Core idea / Run / Proves it** (the metric).
-4. Keep config in env (see `src/ollama.rs`, `src/labdb.rs`) so it's tunable without recompiles.
+4. Keep config in the TOML/env (see `src/config.rs`, `src/ollama.rs`) so it's tunable without recompiles.
 
 ## Conventions
 

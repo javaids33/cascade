@@ -128,12 +128,10 @@ pub async fn run(max_rows: Option<usize>, dim: Option<usize>) -> Result<()> {
     milestones.sort_unstable();
     milestones.dedup();
 
-    // 20 fixed query vectors (reuse some doc embeddings).
-    let qvecs: Vec<String> = (0..rows.len().min(2000))
-        .step_by(100)
-        .take(20)
-        .map(|i| to_json(&rows[i].1))
-        .collect();
+    // 20 fixed query vectors (reuse some doc embeddings) — JSON for SQL, floats for the ANN index.
+    let query_idx: Vec<usize> = (0..rows.len().min(2000)).step_by(100).take(20).collect();
+    let qvecs: Vec<String> = query_idx.iter().map(|&i| to_json(&rows[i].1)).collect();
+    let qfloats: Vec<Vec<f32>> = query_idx.iter().map(|&i| rows[i].1.clone()).collect();
 
     let mut curve = Vec::new();
     let mut inserted = 0usize;
@@ -171,6 +169,46 @@ pub async fn run(max_rows: Option<usize>, dim: Option<usize>) -> Result<()> {
     let self_nn = &nn == pid0;
     let db_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
+    // ANN (HNSW) vs brute-force ground truth over the full corpus: recall@10 + latency. This is
+    // the answer to the "linear scan" honest-limit — an in-memory index that stays ~ms at scale.
+    let ann = if qfloats.is_empty() {
+        serde_json::Value::Null
+    } else {
+        use crate::index::{BruteForce, HnswIndex, VectorIndex};
+        let all: Vec<Vec<f32>> = rows.iter().map(|(_, v)| v.clone()).collect();
+        let bf = BruteForce::new(all.clone());
+        let tb = Instant::now();
+        let hnsw = HnswIndex::build(&all, 16, 200, 64);
+        let build_sec = tb.elapsed().as_secs_f64();
+        let mut times = Vec::new();
+        let mut recalls = Vec::new();
+        for q in &qfloats {
+            let truth: std::collections::HashSet<usize> =
+                bf.search(q, 10).into_iter().map(|(i, _)| i).collect();
+            let t = Instant::now();
+            let got = hnsw.search(q, 10);
+            times.push(t.elapsed().as_secs_f64());
+            let hit = got.iter().filter(|(i, _)| truth.contains(i)).count();
+            recalls.push(hit as f64 / 10.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p50 = times[times.len() / 2];
+        let p95 = times[((times.len() as f64) * 0.95) as usize];
+        let recall = recalls.iter().sum::<f64>() / recalls.len() as f64;
+        println!(
+            "  [ann] hnsw {} vecs built in {:.2}s  p50={:.3}ms  recall@10={:.3}",
+            all.len(), build_sec, p50 * 1000.0, recall
+        );
+        json!({
+            "index": "hnsw", "m": 16, "ef_construction": 200, "ef_search": 64,
+            "rows": all.len(),
+            "build_sec": round(build_sec, 3),
+            "p50_ms": round(p50 * 1000.0, 3),
+            "p95_ms": round(p95 * 1000.0, 3),
+            "recall_at_10": round(recall, 3),
+        })
+    };
+
     save_result(
         "vector",
         json!({
@@ -179,7 +217,9 @@ pub async fn run(max_rows: Option<usize>, dim: Option<usize>) -> Result<()> {
             "latency_curve": curve,
             "self_nn_correct": self_nn,
             "db_bytes": db_bytes,
-            "note": "linear scan, no ANN index in Turso v0.6.1; latency grows ~linearly with rows",
+            "ann": ann,
+            "note": "brute-force in Turso v0.6.1 (linear); the `ann` block is an in-memory HNSW (hnsw_rs) \
+                     over the same vectors — recall@10 vs brute-force ground truth + latency.",
         }),
     )?;
     println!("\nself-NN correct: {self_nn}");

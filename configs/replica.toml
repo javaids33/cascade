@@ -7,6 +7,7 @@ db   = ".work/db/replica.db"
 [sync]
 enabled    = true
 remote_url = "http://MASTER_IP:8080"
+# writeback_url = "http://MASTER_IP:7070"   # master's gateway, for `cascade flush` (edge write-back)
 
 [embedding]
 url   = "http://localhost:11434"

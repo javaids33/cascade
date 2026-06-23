@@ -30,10 +30,12 @@ Litestream. Here it's two small processes and a sync port.
 ## 0. One rule that must hold on both machines
 
 Documents are embedded on the **PC**; queries are embedded on the **Mac**. They must use the **same
-embedding model** so the vectors share a space:
+embedding model** so the vectors share a space — set `[embedding]` identically in both configs:
 
-```
-EMBED_MODEL=all-minilm   EMBED_DIM=384      # F32_BLOB(384) — set identically on both
+```toml
+[embedding]
+model = "all-minilm"   # same on both machines
+dim   = 384            # F32_BLOB(384)
 ```
 
 ---
@@ -59,7 +61,7 @@ sufficient.
 ## 2. Setup — PC (master)
 
 ```bash
-# prerequisites: Rust ≥1.92, git, Ollama (with the 3070), Tailscale
+# prerequisites: Rust ≥1.94, git, Ollama (with the 3070), Tailscale
 git pull
 ./setup.sh                          # downloads tursodb CLI + cargo build --release
 ollama pull all-minilm              # 384-d embedder, runs on the 3070
@@ -78,7 +80,7 @@ stress test), `namespace` (`0` = articles), `kind` (`wikimedia|hn|demo`), `[sync
 ## 3. Setup — Mac (edge)
 
 ```bash
-# prerequisites: Rust ≥1.92, git, Ollama, Tailscale
+# prerequisites: Rust ≥1.94, git, Ollama, Tailscale
 git pull
 ./setup.sh
 ollama pull all-minilm              # same embedder as the PC (required)
@@ -130,8 +132,8 @@ the whole stream — happens once, where the GPU is.
 
 Ollama stays on the **host** of each machine (GPU/Metal), so containers point at it via
 `host.docker.internal`. See `docker/` — `Dockerfile` builds `cascade` + bundles the `tursodb` CLI;
-`docker-compose.master.yml` runs the hub + ingest + periodic olap on the PC;
-`docker-compose.edge.yml` runs an interactive edge for `rag`. Native (above) is the faster dev loop
+`docker-compose.master.yml` runs the hub + `serve` (ingest) on the PC (run `drain` for the OLAP lane);
+`docker-compose.edge.yml` runs an interactive edge for `search`. Native (above) is the faster dev loop
 and matches "PC can change master-side code easily"; Docker is for keeping the master always-on.
 
 ---
@@ -139,5 +141,6 @@ and matches "PC can change master-side code easily"; Docker is for keeping the m
 ## 6. Repo workflow
 
 Develop on the Mac, `git push`; on the PC `git pull` and `cargo build --release`. The lab is all in
-this repo (`src/ingest.rs`, `src/rag.rs`, `src/lab_olap.rs`, `src/ollama.rs`, `src/labdb.rs`,
-`docker/`). Results land in `results/lab_olap.json`.
+this repo — the `serve`/`search`/`drain` commands over `src/node.rs` (the engine), `src/source.rs`
+(firehose sources), `src/ollama.rs` (embeddings + generation), and `src/cdc_to_olap.rs` (the OLAP
+drain) — plus `docker/`. `cascade drain` prints the drained-changes + DuckDB-rows summary.

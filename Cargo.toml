@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Turso-core toolkit: set up master/replica edge nodes with CDC->OLAP and embed-once vector fan-out, from a config file or a Rust API."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/javaids33/turso-edge-olap"
+repository = "https://github.com/javaids33/cascade"
 readme = "README.md"
 keywords = ["turso", "sqlite", "cdc", "vector", "edge"]
 categories = ["database", "command-line-utilities"]
@@ -29,6 +29,9 @@ toml = "0.8"
 rand = "0.8"
 rand_distr = "0.4"
 anyhow = "1"
+
+# B3: pure-Rust HNSW ANN index — edge vector search beyond the brute-force ceiling.
+hnsw_rs = "0.3"
 
 # Lab: HTTP client for Ollama (embeddings/generation) + Wikimedia SSE firehose.
 # Pinned: reqwest >=0.12.24 pulls hyper 1.10.1, which floors on an unpublished h2 0.4.14.

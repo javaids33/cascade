@@ -32,7 +32,9 @@ echo "[2/5] health"
 TURSODB="$(find .work/bin -name tursodb -type f 2>/dev/null | head -1)"
 [ -n "$TURSODB" ] && ok "tursodb CLI present" || bad "tursodb CLI missing (./setup.sh)"
 OLLAMA_OK=0
-if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+if [ -n "${CASCADE_FAKE_EMBED:-}" ] && [ "${CASCADE_FAKE_EMBED}" != "0" ]; then
+  ok "fake embedder (CASCADE_FAKE_EMBED) — skipping Ollama checks"; OLLAMA_OK=1
+elif curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
   ok "ollama reachable"
   if curl -s http://localhost:11434/api/tags | grep -q all-minilm; then ok "all-minilm present"; OLLAMA_OK=1
   else bad "all-minilm missing (ollama pull all-minilm)"; fi

@@ -46,7 +46,7 @@ model/dim, OLAP target, and a built-in `source` (`wikimedia` | `hn` | `demo` | `
 
 ```toml
 # Cargo.toml
-cascade = { git = "https://github.com/javaids33/turso-edge-olap" }
+cascade = { git = "https://github.com/javaids33/cascade" }
 ```
 ```rust
 use cascade::{Config, Node};
@@ -82,18 +82,9 @@ runbook (LAN preflight, CDC + push-down checks), see [`TEST.md`](TEST.md).
 A reproducible benchmark harness for the core pattern — implemented natively in **Rust** (the
 `turso`, `duckdb`, and `iceberg` crates; no Python):
 
-```
-  ┌─────────────────────┐   native sync   ┌──────────────────────┐
-  │  Primary "master"   │ ──────────────▶ │  Replica "slave"     │  edge reads +
-  │  Turso (OLTP)       │  (WAL pages)    │  Turso (edge)        │  vector search
-  │  + CDC capture      │                 └──────────────────────┘
-  └─────────┬───────────┘
-            │ turso_cdc (change_id cursor, decoded to JSON)
-            ▼
-  ┌─────────────────────┐
-  │ CDC → OLAP loader   │ ──▶  DuckDB  +  Apache Iceberg   ──▶  analytics
-  └─────────────────────┘
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="cascade flow: a source/firehose feeds a Turso master (embed once + store + CDC capture); the master fans out over native sync through a hub to CPU-only edge replicas that pull finished vectors and do co-located vector search, while the CDC stream drains to a DuckDB/Iceberg analytics lane and a broker-free webhook/jsonl change feed; edges write back out-of-band via outbox to the master's gateway /inbox" width="900">
+</p>
 
 The thesis: **Turso isn't an analytics engine — it's a clean *source* into one.** Edge OLTP +
 built-in CDC + native replication + co-located vectors, with DuckDB/Iceberg doing the heavy
@@ -106,14 +97,16 @@ analytical lifting.
 ./run.sh                   # synthetic data → full pipeline + benchmarks → docs/REPORT.md
 ```
 
-No external dataset required — `run.sh` generates synthetic patents data by default. To
-reproduce the headline numbers on real data:
+No external dataset required — `run.sh` generates synthetic patents data by default. To run the
+same harness on your own data:
 
 ```bash
 PATENTS_JSONL=/path/to/patents.jsonl ./run.sh
 ```
 
-Results land in `results/*.json`; a written report is generated at `docs/REPORT.md`.
+Results land in `results/*.json` (committed) and roll up into `docs/REPORT.md`. `run-all` also
+archives a self-consistent copy under `results/<run-id>/` so a later run can't clobber a baseline
+you cited.
 
 ## What it measures
 
@@ -128,27 +121,39 @@ server for the replication phase.
 | 3a | `cdc-overhead` | CDC capture cost (throughput + storage) |
 | 3b | `cdc-to-olap` | drain `turso_cdc` → DuckDB + Iceberg |
 | 4 | `olap` | analytical queries: DuckDB vs Turso (lane comparison) |
-| 5 | `vector` | edge `vector_distance_cos` latency vs row count |
+| 5 | `vector` | edge `vector_distance_cos` latency vs row count (+ HNSW `ann` block) |
 | 6 | `report` | synthesize `results/*.json` → `docs/REPORT.md` |
 
-## Headline results (real data: 171,317 energy-storage patents)
+Outside `run-all`: `cascade compare-cdc` (competitor comparison — built-in CDC vs the hand-rolled
+SQLite trigger pattern), `cascade prune` (bound the CDC log), `cascade enqueue`/`flush` (edge
+write-back). Cross-engine harness (Postgres+Debezium, SQLite+Litestream) lives in [`docker/compare/`](docker/compare/).
 
-- **CDC overhead:** ~17–24% write-throughput cost, ~2× storage (`full` mode, before+after images).
-- **CDC → OLAP:** tens of thousands of changes/s into DuckDB + a real Iceberg table, sinks verified consistent.
-- **Replication:** sub-second replica bootstrap; ~10–40ms incremental catch-up via page-level WAL sync.
-- **OLAP lane gap:** DuckDB beats Turso by 10–200× on aggregations/joins (expected — columnar vs row).
-- **Edge vector search:** works today, but **linear-scan (no ANN index)** — latency grows ~linearly.
+## Headline results
 
-See [`docs/REPORT.md`](docs/REPORT.md) for the full writeup, and [`CLAUDE.md`](CLAUDE.md) for
-setup internals / known gaps.
+The numbers below are the **committed `results/*.json`** from one `./run.sh` on synthetic data
+(50k rows; replication phase uses 18k + a 2k delta). They regenerate exactly with `./run.sh` and
+roll up into [`docs/REPORT.md`](docs/REPORT.md).
+
+- **CDC overhead:** **43.7%** write-throughput cost (307k → 173k inserts/s) and **2.01×** storage —
+  `full` mode, 50,012 change records captured for 50,000 inserts.
+- **CDC → OLAP:** 50,000 changes drained into DuckDB + a real Iceberg table at **~4,851 changes/s**;
+  `duckdb == iceberg == source` (consistent).
+- **Replication:** 18k-row replica bootstrap in **1.21s** (11.8 MB); 2k-row delta in **0.30s**
+  (1.4 MB); converged.
+- **OLAP lane gap:** DuckDB beats Turso by **2.5× – 189×** on aggregations/joins (expected — columnar
+  vs row), which is *why* you drain.
+- **Edge vector search:** Turso brute-force **0.23 ms @ 1k → 14.2 ms @ 50k** (linear, dim 64),
+  nearest-neighbor correct; an in-memory **HNSW** index (`hnsw_rs`) is also measured (recall@10 +
+  latency) to push past the linear ceiling.
+
+See [`CLAUDE.md`](CLAUDE.md) for setup internals / known gaps.
 
 ## Benchmarks — what we tested, why, and what it proves
 
-Two kinds of evidence: the **harness** (one command per phase) and a **live two-machine run** (a
-Windows + GPU master and a CPU-only Mac edge). The numbers below are *measured this run* on a dev box
-(synthetic 20k rows, WSL2 on NTFS — i.e. **conservative**; native Linux/ext4 is faster). The
-real-data headline above (171k patents) shows lower CDC overhead because cost amortizes with scale.
-Reproduce everything with `./run.sh`.
+Two kinds of evidence: the **harness** (one command per phase, numbers committed in `results/`) and a
+**live two-machine run** (a Windows + GPU master and a CPU-only Mac edge, reported separately below).
+The harness table is the committed synthetic run (50k rows; replication 18k + 2k delta) — every cell
+traces to a `results/*.json` field and regenerates with `./run.sh`.
 
 Each benchmark targets one stage of the pipeline:
 
@@ -161,15 +166,18 @@ flowchart LR
   DRAIN --> OLAP{{olap<br/>DuckDB vs Turso}}
 ```
 
-| Benchmark | What it tests | Why it matters | Measured (this run) | Use case it validates |
+| Benchmark | What it tests | Why it matters | Measured (committed `results/`) | Use case it validates |
 |---|---|---|---|---|
-| **cdc-overhead** | write throughput + storage, CDC off vs on | is built-in CDC cheap enough to leave on always? | 98k → 56k inserts/s (**~43%** cost), **2.0×** storage | CDC without a broker (vs Debezium + Kafka) |
-| **replication** | bootstrap + incremental sync throughput/bytes | can an edge join fast and stay fresh cheaply? | bootstrap **18k rows in 1.2s / 12.4MB**; delta **2k rows in 0.3s / 1.4MB**; converged | self-replicating edge OLTP (vs Postgres replicas + Litestream) |
-| **vector** | `vector_distance_cos` latency vs rows (NN accuracy checked) | is co-located search fast at edge scale? | **0.4ms@1k → 9.6ms@20k** (linear), nearest-neighbor correct | co-located vector search (vs Pinecone / pgvector) |
-| **cdc-to-olap** | drain `turso_cdc` → DuckDB + Iceberg + consistency | is the analytics feed correct and quick? | 20k changes @ **519/s**, `duckdb == iceberg == source` | lakehouse source (vs bespoke Iceberg ETL) |
-| **olap** | analytical queries: DuckDB vs Turso | why drain at all instead of querying OLTP? | DuckDB **3.5× – 155×** faster | the OLAP-lane separation itself |
+| **cdc-overhead** | write throughput + storage, CDC off vs on | is built-in CDC cheap enough to leave on always? | 307k → 173k inserts/s (**43.7%** cost), **2.01×** storage (50k rows, 50,012 changes) | CDC without a broker (vs Debezium + Kafka) |
+| **replication** | bootstrap + incremental sync throughput/bytes | can an edge join fast and stay fresh cheaply? | bootstrap **18k rows in 1.21s / 11.8MB**; delta **2k rows in 0.30s / 1.4MB**; converged | self-replicating edge OLTP (vs Postgres replicas + Litestream) |
+| **vector** | `vector_distance_cos` latency vs rows (NN accuracy checked) | is co-located search fast at edge scale? | **0.23ms@1k → 14.2ms@50k** (brute, linear), nearest-neighbor correct; HNSW `ann` block | co-located vector search (vs Pinecone / pgvector) |
+| **cdc-to-olap** | drain `turso_cdc` → DuckDB + Iceberg + consistency | is the analytics feed correct and quick? | 50k changes @ **4,851/s**, `duckdb == iceberg == source` | lakehouse source (vs bespoke Iceberg ETL) |
+| **olap** | analytical queries: DuckDB vs Turso | why drain at all instead of querying OLTP? | DuckDB **2.5× – 189×** faster (3.1M rows loaded) | the OLAP-lane separation itself |
 
 ### Live two-machine run — the AI-distribution pattern
+
+> Observed on a real two-machine run (Windows+GPU master, Apple M3 CPU edge) — reported here for
+> context; these figures are **not** in the committed `results/` (that's the synthetic harness above).
 
 A GPU producer embeds once; CPU-only edges pull finished vectors and search locally:
 
@@ -202,11 +210,16 @@ single-digit ms.
   (`duckdb == iceberg == source`), edge **1:1 docs↔vectors** confirmed across two machines.
 
 ### Honest limits
-- Vectors are **linear-scan (no ANN index)** — great to tens of thousands of rows per edge, not
-  billion-scale.
-- Sync is **one-way (master → replica)** — read replicas, no multi-primary / write-back.
+- Turso's own vector search is **linear-scan (no ANN index)** — great to tens of thousands of rows
+  per edge. To go further, `cascade vector` now also builds an in-memory **HNSW** index (`hnsw_rs`)
+  and reports recall@10 + latency vs brute-force; native Turso ANN is still pending.
+- Sync is **one-way (master → replica)** — read replicas, no multi-primary. Edge writes are
+  supported only via a constrained out-of-band path: `cascade enqueue`/`flush` ship a local outbox
+  to the master's gateway `/inbox` (queue-based, not conflict-free).
 - Turso is **beta**; under churn we hit a transient `F32_BLOB` push quirk (self-healed, 0 net
-  failures). No competitor pipeline was stood up — comparisons are conceptual plus our numbers.
+  failures). Competitor numbers: `cascade compare-cdc` measures built-in CDC vs the hand-rolled
+  SQLite trigger pattern today; the cross-engine pipeline (Postgres+Debezium, SQLite+Litestream) is
+  scaffolded in [`docker/compare/`](docker/compare/) and still needs a Linux run to quote.
 
 ## Live lab: "Living Knowledge Base" (distributed edge RAG)
 
@@ -214,16 +227,34 @@ Beyond the synthetic benchmark, [`LAB.md`](LAB.md) is a two-machine lab that exe
 capability at once on a **live** stream: a **master** ingests the Wikimedia firehose, embeds each
 edit on a GPU (Ollama), and writes to Turso with **CDC** on; that feeds a **DuckDB OLAP** lane *and*
 replicates over **native sync** to an **edge** that answers questions with **co-located vector
-search** + a local LLM — no separate vector DB. New `cascade` subcommands: `ingest` (master), `rag`
-(edge), `lab-olap` (CDC→DuckDB trends). Transport is just `TURSO_REMOTE_URL` (Tailscale/LAN). See
+search** + a local LLM — no separate vector DB. It runs on the node commands: `serve` (master:
+ingest + embed + CDC + push), `search` (edge: pull + co-located search + RAG), and `drain` (master:
+CDC→DuckDB OLAP trends). Transport is just the config's `sync.remote_url` (Tailscale/LAN). See
 [`LAB.md`](LAB.md) and [`docker/`](docker/).
+
+## Tests
+
+Three layers, fastest first:
+
+| Test | Command | What it guards |
+|---|---|---|
+| Config contract (pure, no infra) | `cargo test --test config_cases` | 9 tests: the shipped `configs/*.toml` + embedded examples parse, defaults apply, bad roles reject |
+| Post-build gate (one machine) | `./test.sh` | config contract → health → master role (ingest+CDC+drain) → replica role (pull + co-located search), a full round-trip; exits non-zero on any failure |
+| CI (Linux) | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | build + `config_cases` + clippy on every push, plus an optional end-to-end smoke job |
+
+No GPU or Ollama needed: set **`CASCADE_FAKE_EMBED=1`** to swap in a deterministic hashing embedder,
+so `./test.sh` (and CI) exercise the full ingest → CDC → search path offline:
+
+```bash
+./setup.sh && CASCADE_FAKE_EMBED=1 ./test.sh
+```
 
 ## Requirements
 
 - macOS (arm64/x86_64) or Linux/WSL2 (x86_64/aarch64). **Windows native is unsupported** — the
   prebuilt `tursodb` sync-server CLI targets macOS/Linux and its async `io_uring` path is
   Linux-only; use WSL2.
-- **Rust toolchain ≥ 1.92** (`cargo`), `bash`, `curl`, `tar` with `.xz` support, `git`. The
+- **Rust toolchain ≥ 1.94** (`cargo`), `bash`, `curl`, `tar` with `.xz` support, `git`. The
   DuckDB engine is built bundled (no system DuckDB needed); first `cargo build` is a few minutes.
 
 ## Configuration (env vars)

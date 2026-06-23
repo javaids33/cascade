@@ -65,6 +65,13 @@ pub fn results_dir() -> PathBuf {
     repo_root().join("results")
 }
 
+/// A run identifier for archiving a self-consistent set of results under `results/<run-id>/`.
+/// Set `CASCADE_RUN_ID` (or pass `--run-id` to `run-all`) to keep a stable baseline instead of
+/// only the overwritten `results/*.json`. `None` = archive disabled (just the flat latest files).
+pub fn run_id() -> Option<String> {
+    std::env::var("CASCADE_RUN_ID").ok().filter(|s| !s.is_empty())
+}
+
 pub fn remote_url() -> String {
     std::env::var("TURSO_REMOTE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
 }
@@ -290,6 +297,13 @@ pub fn save_result(name: &str, mut payload: serde_json::Value) -> Result<serde_j
     for d in [out_dir(), results_dir()] {
         fs::create_dir_all(&d).ok();
         fs::write(d.join(format!("{name}.json")), &pretty)?;
+    }
+    // Archive a stable, self-consistent copy under results/<run-id>/ when a run id is set, so a
+    // later `./run.sh` (which overwrites results/*.json) doesn't clobber a baseline you cited.
+    if let Some(id) = run_id() {
+        let d = results_dir().join(id);
+        fs::create_dir_all(&d).ok();
+        let _ = fs::write(d.join(format!("{name}.json")), &pretty);
     }
     println!("[saved] results/{name}.json");
     Ok(payload)

@@ -1,0 +1,18 @@
+# cascade EDGE for docker/docker-compose.edge.yml.
+# Set PC_IP to the master's Tailscale/LAN ip; the compose passes it as CASCADE_REMOTE_URL, which
+# overrides sync.remote_url below at run time. Ollama runs on the host, via host.docker.internal.
+[node]
+role = "replica"
+db   = "/work/.work/db/lab_edge.db"
+
+[sync]
+enabled    = true
+remote_url = "http://MASTER_IP:8080"        # overridden by CASCADE_REMOTE_URL from the compose
+
+[embedding]
+url   = "http://host.docker.internal:11434"
+model = "all-minilm"
+dim   = 384
+
+[generation]
+model = "qwen2.5:1.5b"                       # "" = retrieval only, no LLM answer

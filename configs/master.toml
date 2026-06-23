@@ -13,6 +13,8 @@ push_every = 32
 
 [cdc]
 enabled = true
+mode    = "full"                        # off | id | before | after | full  (full = ~2x storage)
+retain  = true                          # false = prune turso_cdc up to the drained cursor each drain
 
 [embedding]
 url   = "http://localhost:11434"
@@ -21,6 +23,8 @@ dim   = 384
 
 [olap]
 duckdb = ".work/olap/master.duckdb"
+# webhook = "http://localhost:9000/cdc" # also POST each change (broker-free change feed)
+# jsonl   = ".work/olap/changes.jsonl"  # also append each change as a JSON line
 
 [source]
 kind      = "wikimedia"

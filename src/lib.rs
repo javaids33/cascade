@@ -34,10 +34,12 @@ pub mod config;
 pub mod gateway;
 pub mod node;
 pub mod ollama;
+pub mod sink;
 pub mod source;
 pub mod sync_server;
 
 pub use config::{Config, Role};
 pub use node::{Hit, Node, OlapStats};
+pub use sink::{ChangeRow, Op, Sink};
 pub use source::Source;
 pub use sync_server::SyncServer;

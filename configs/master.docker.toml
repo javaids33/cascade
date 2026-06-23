@@ -1,0 +1,29 @@
+# cascade MASTER for docker/docker-compose.master.yml.
+# The sync hub runs as a SEPARATE container (service `hub`), so serve=false here and remote_url
+# points at it by service name. Ollama runs on the host GPU, reached via host.docker.internal.
+[node]
+role = "master"
+db   = "/work/.work/db/lab_master.db"
+
+[sync]
+enabled    = true
+serve      = false                          # the `hub` container owns tursodb --sync-server
+remote_url = "http://hub:8080"
+push_every = 32
+
+[cdc]
+enabled = true
+
+[embedding]
+url   = "http://host.docker.internal:11434"
+model = "all-minilm"
+dim   = 384
+
+[olap]
+duckdb = "/work/.work/olap/lab_master.duckdb"
+
+[source]
+kind      = "wikimedia"
+wiki      = "enwiki"
+namespace = "0"
+max_items = 0                               # 0 = run forever

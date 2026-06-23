@@ -55,9 +55,13 @@ decode the before/after row images to JSON with `bin_record_json_object()`.
 ```bash
 cascade cdc-overhead         # the cost: ~throughput % + ~2x storage for `full` mode
 cascade cdc-to-olap          # drain turso_cdc -> DuckDB + Iceberg, verify both sinks consistent
+cascade compare-cdc          # built-in CDC vs the hand-rolled SQLite trigger pattern vs none
 ```
 **Proves it:** `throughput_overhead_pct` / `storage_amplification_x` (the honest cost) and
-`consistent: true` (the drained sinks match) in `results/`.
+`consistent: true` (the drained sinks match) in `results/`. `compare-cdc` puts the built-in PRAGMA
+next to the trigger+shadow-table approach you'd hand-roll on stock SQLite (`results/compare_cdc.json`).
+For the full cross-engine stack (**Postgres + Debezium + Kafka**), stand it up with
+[`docker/compare/`](docker/compare/).
 
 > Gotcha worth knowing: `bin_record_json_object` can't decode BLOB columns. Keep vectors in their own
 > table (see the lab's `docs` vs `doc_vectors` split) so the CDC→OLAP decode never touches a BLOB.
@@ -78,7 +82,10 @@ cascade vector               # synthetic: latency curve as rows grow, self-NN co
 cascade search "your question" --config configs/replica.toml   # live: embed -> co-located top-k -> LLM
 ```
 **Proves it:** `[retrieval]` ≈ 1–3 ms in `cascade search` output — local, no network. (Honest limit:
-brute-force, so latency grows ~linearly; size the edge corpus to ~10k–100k chunks.)
+Turso's own search is brute-force, so latency grows ~linearly; size the edge corpus to ~10k–100k
+chunks.) **Breaking the ceiling:** `cascade vector` now also builds an in-memory **HNSW** index
+(`hnsw_rs`) over the same vectors and reports the `ann` block — `recall@10` vs brute-force ground
+truth + latency — the path to millions of vectors per edge while Turso-native ANN is pending.
 
 ---
 

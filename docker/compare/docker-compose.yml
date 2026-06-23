@@ -1,0 +1,37 @@
+# Postgres + Debezium + Kafka — the "CDC without a broker" competitor stack (Pattern P2).
+# This is exactly the pile Cascade collapses into one PRAGMA: a DB + a connector + a broker + ZK.
+#   docker compose -f docker/compare/docker-compose.yml up -d
+#   ./docker/compare/bench-pg-debezium.sh 50000
+#   docker compose -f docker/compare/docker-compose.yml down -v
+
+services:
+  postgres:
+    image: debezium/postgres:16          # ships with logical decoding (wal_level=logical) preset
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    ports: ["5432:5432"]
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+
+  zookeeper:
+    image: quay.io/debezium/zookeeper:2.7
+    ports: ["2181:2181"]
+
+  kafka:
+    image: quay.io/debezium/kafka:2.7
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      ZOOKEEPER_CONNECT: zookeeper:2181
+
+  connect:
+    image: quay.io/debezium/connect:2.7
+    depends_on: [kafka, postgres]
+    ports: ["8083:8083"]                 # Kafka Connect REST — register the Debezium connector here
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: bench
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses

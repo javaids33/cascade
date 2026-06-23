@@ -1,15 +1,16 @@
-# PC master: sync-server hub + continuous ingest (embeds on the host 3070 via Ollama).
+# PC master: sync-server hub + continuous serve (ingest + embed + CDC + push).
 # Run from the repo root:  docker compose -f docker/docker-compose.master.yml up --build
 #
-# Ollama runs on the host with the GPU; containers reach it at host.docker.internal:11434.
-# The hub publishes 8080 — point the Mac edge at  http://<this-PC-ip>:8080  (Tailscale/LAN).
+# Ollama runs on the host with the GPU; containers reach it at host.docker.internal:11434
+# (baked into configs/master.docker.toml). The hub publishes 8080 — point the Mac edge at
+# http://<this-PC-ip>:8080 (Tailscale/LAN). For the OLAP lane, run a one-off drain:
+#   docker compose -f docker/docker-compose.master.yml run --rm serve drain --config configs/master.docker.toml
 
 services:
   hub:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    command: ["--help"]   # overridden below; we run tursodb directly
     entrypoint: ["tursodb", "/work/.work/db/lab_hub.db", "--sync-server", "0.0.0.0:8080"]
     ports:
       - "8080:8080"
@@ -18,22 +19,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  ingest:
+  serve:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     depends_on: [hub]
-    command: ["ingest"]
-    environment:
-      LAB_SYNC: "1"
-      TURSO_REMOTE_URL: "http://hub:8080"
-      LAB_DB: "/work/.work/db/lab_master.db"
-      LAB_SOURCE: "wikimedia"
-      LAB_WIKI: "enwiki"
-      LAB_NS: "0"
-      EMBED_MODEL: "all-minilm"
-      EMBED_DIM: "384"
-      OLLAMA_URL: "http://host.docker.internal:11434"
+    command: ["serve", "--config", "configs/master.docker.toml"]
     volumes:
       - ../.work:/work/.work
     extra_hosts:

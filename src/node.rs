@@ -112,9 +112,12 @@ impl Node {
         let node = Node { cfg, handle, client };
 
         if node.cfg.is_master() {
-            if node.cfg.cdc.enabled {
+            if node.cfg.cdc.enabled && node.cfg.cdc.mode != "off" {
                 node.conn()
-                    .execute("PRAGMA capture_data_changes_conn('full')", ())
+                    .execute(
+                        &format!("PRAGMA capture_data_changes_conn('{}')", node.cfg.cdc.mode),
+                        (),
+                    )
                     .await?;
             }
             node.conn()
@@ -129,6 +132,14 @@ impl Node {
                         "CREATE TABLE IF NOT EXISTS doc_vectors(id TEXT PRIMARY KEY, emb F32_BLOB({}))",
                         node.cfg.embedding.dim
                     ),
+                    (),
+                )
+                .await?;
+            // Write-back landing table for edge outboxes (replicates out like any table; the
+            // docs OLAP drain ignores it since it filters table_name = 'docs').
+            node.conn()
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS inbox(id TEXT PRIMARY KEY, ts INTEGER, src TEXT, payload TEXT)",
                     (),
                 )
                 .await?;
@@ -177,7 +188,19 @@ impl Node {
 
     /// Co-located vector search: embed `query`, return the top-`k` nearest docs locally.
     pub async fn search(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
+        Ok(self.search_timed(query, k).await?.0)
+    }
+
+    /// Like [`search`](Node::search) but also returns the timing breakdown
+    /// `(hits, embed_ms, scan_ms)`. `embed_ms` is the query round-trip to Ollama (network);
+    /// `scan_ms` is the pure co-located `vector_distance_cos` scan (the edge-locality win).
+    /// Keeping them separate stops the embedding round-trip from being misattributed to "search".
+    pub async fn search_timed(&self, query: &str, k: usize) -> Result<(Vec<Hit>, f64, f64)> {
+        let te = Instant::now();
         let qv = embed(&self.client, &self.cfg.embedding.url, &self.cfg.embedding.model, query).await?;
+        let embed_ms = te.elapsed().as_secs_f64() * 1000.0;
+
+        let ts = Instant::now();
         let mut rows = self
             .conn()
             .query(
@@ -207,7 +230,8 @@ impl Node {
             };
             hits.push(Hit { id, text, meta, score });
         }
-        Ok(hits)
+        let scan_ms = ts.elapsed().as_secs_f64() * 1000.0;
+        Ok((hits, embed_ms, scan_ms))
     }
 
     /// Build a cited RAG prompt from hits and generate an answer via the configured LLM.
@@ -226,22 +250,29 @@ impl Node {
         crate::ollama::generate(&self.client, &self.cfg.embedding.url, &self.cfg.generation.model, &prompt).await
     }
 
-    /// Master: drain the `docs` CDC stream into DuckDB (full rebuild from the change log).
+    /// Master: drain the `docs` CDC stream to every configured sink (DuckDB rebuild, webhook
+    /// fan-out, and/or a JSONL change feed). Decodes `turso_cdc` once and fans each change out.
     pub async fn drain_olap(&self) -> Result<OlapStats> {
-        let duck_path = self
+        use crate::sink::{ChangeRow, DuckDbDocsSink, JsonlSink, Op, Sink, WebhookSink};
+
+        // Build the configured sinks; at least one must be set.
+        let mut duck = match &self.cfg.olap.duckdb {
+            Some(p) => Some(DuckDbDocsSink::open(p)?),
+            None => None,
+        };
+        let mut webhook = self
             .cfg
             .olap
-            .duckdb
-            .clone()
-            .context("olap.duckdb not set in config")?;
-        ensure_parent(&duck_path);
-        let duck = duckdb::Connection::open(&duck_path)?;
-        duck.execute_batch(
-            "CREATE TABLE IF NOT EXISTS docs(id VARCHAR PRIMARY KEY, text VARCHAR, meta VARCHAR, ts BIGINT); \
-             DELETE FROM docs;",
-        )?;
-        let ins = "INSERT OR REPLACE INTO docs VALUES (?,?,?,?)";
-        let del = "DELETE FROM docs WHERE id=?";
+            .webhook
+            .as_ref()
+            .map(|u| WebhookSink::new(self.client.clone(), u));
+        let mut jsonl = match &self.cfg.olap.jsonl {
+            Some(p) => Some(JsonlSink::create(p)?),
+            None => None,
+        };
+        if duck.is_none() && webhook.is_none() && jsonl.is_none() {
+            anyhow::bail!("no OLAP sink configured (set [olap] duckdb / webhook / jsonl)");
+        }
 
         let decode = "SELECT change_id, change_type, \
              bin_record_json_object(table_columns_json_array(table_name), after)  AS a, \
@@ -264,51 +295,182 @@ impl Node {
                     Value::Integer(i) => i,
                     _ => continue,
                 };
+                let op = match Op::from_cdc(ctype) {
+                    Some(o) => o,
+                    None => continue,
+                };
                 let after = match row.get_value(2)? {
-                    Value::Text(s) => Some(s.to_string()),
+                    Value::Text(s) => serde_json::from_str(&s).ok(),
                     _ => None,
                 };
                 let before = match row.get_value(3)? {
-                    Value::Text(s) => Some(s.to_string()),
+                    Value::Text(s) => serde_json::from_str(&s).ok(),
                     _ => None,
                 };
-                match ctype {
-                    1 | 0 => {
-                        if let Some(a) = after {
-                            let o: J = serde_json::from_str(&a)?;
-                            duck.execute(
-                                ins,
-                                duckdb::params![
-                                    o.get("id").and_then(|x| x.as_str()).unwrap_or(""),
-                                    o.get("text").and_then(|x| x.as_str()).unwrap_or(""),
-                                    o.get("meta").and_then(|x| x.as_str()).unwrap_or(""),
-                                    o.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)
-                                ],
-                            )?;
-                            changes += 1;
-                        }
-                    }
-                    -1 => {
-                        if let Some(b) = before {
-                            let o: J = serde_json::from_str(&b)?;
-                            duck.execute(del, [o.get("id").and_then(|x| x.as_str()).unwrap_or("")])?;
-                            changes += 1;
-                        }
-                    }
-                    _ => {}
+                let img: Option<&J> = if op == Op::Delete { before.as_ref() } else { after.as_ref() };
+                let id = match img {
+                    Some(o) => o.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    None => continue, // no usable row image
+                };
+                let cr = ChangeRow { op, table: "docs".to_string(), id, after, before };
+                if let Some(s) = duck.as_mut() {
+                    s.apply(&cr).await?;
                 }
+                if let Some(s) = webhook.as_mut() {
+                    s.apply(&cr).await?;
+                }
+                if let Some(s) = jsonl.as_mut() {
+                    s.apply(&cr).await?;
+                }
+                changes += 1;
             }
             if got == 0 {
                 break;
             }
         }
-        let rows: i64 = duck.query_row("SELECT COUNT(*) FROM docs", [], |r| r.get(0))?;
+        if let Some(s) = duck.as_mut() {
+            s.flush().await?;
+        }
+        if let Some(s) = webhook.as_mut() {
+            s.flush().await?;
+        }
+        if let Some(s) = jsonl.as_mut() {
+            s.flush().await?;
+        }
+
+        // Retention: prune the drained change log unless the config asks to keep it. Best-effort —
+        // turso_cdc deletability can vary, so a failure here never fails the drain.
+        if !self.cfg.cdc.retain && cursor > 0 {
+            let _ = self
+                .conn()
+                .execute("DELETE FROM turso_cdc WHERE change_id <= ?1", (cursor,))
+                .await;
+        }
+
+        let (duckdb_rows, duckdb_path) = match &duck {
+            Some(s) => (s.rows()?, s.path().to_string()),
+            None => (0, String::new()),
+        };
         Ok(OlapStats {
             changes,
-            duckdb_rows: rows,
+            duckdb_rows,
             seconds: t0.elapsed().as_secs_f64(),
-            duckdb_path: duck_path,
+            duckdb_path,
         })
+    }
+
+    /// Prune the CDC change log: delete `turso_cdc` rows with `change_id <= up_to` (or all rows
+    /// when `up_to` is `None`). Returns the number of rows removed. Use after you've drained the
+    /// log to keep it bounded on a long-running master.
+    pub async fn prune_cdc(&self, up_to: Option<i64>) -> Result<u64> {
+        let n = match up_to {
+            Some(c) => {
+                self.conn()
+                    .execute("DELETE FROM turso_cdc WHERE change_id <= ?1", (c,))
+                    .await?
+            }
+            None => self.conn().execute("DELETE FROM turso_cdc", ()).await?,
+        };
+        Ok(n)
+    }
+
+    // ---- B4: constrained write-back (outbox on the edge -> inbox on the master) ----
+    //
+    // Native sync is one-way (master -> replica), so an edge can't push through the sync engine.
+    // Instead it queues local writes in a SEPARATE local db (`<db>.outbox`, untouched by sync) and
+    // ships them out-of-band to the master's gateway `/inbox`. The master lands them in `inbox`,
+    // which then replicates back out to every edge. Queue-based, not conflict-free multi-master.
+
+    fn outbox_path(&self) -> String {
+        format!("{}.outbox", self.cfg.node.db)
+    }
+
+    async fn open_outbox(&self) -> Result<(turso::Database, turso::Connection)> {
+        let db = turso::Builder::new_local(&self.outbox_path()).build().await?;
+        let conn = db.connect()?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, \
+             ts INTEGER, payload TEXT, acked INTEGER DEFAULT 0)",
+            (),
+        )
+        .await?;
+        Ok((db, conn))
+    }
+
+    /// Replica: append a JSON payload to the local write-back outbox. Held until [`flush_outbox`].
+    pub async fn enqueue(&self, payload: &J) -> Result<()> {
+        let (_db, conn) = self.open_outbox().await?;
+        conn.execute(
+            "INSERT INTO outbox(ts, payload, acked) VALUES (?1, ?2, 0)",
+            vec![Value::Integer(now_ts()), Value::Text(payload.to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Replica: POST every un-acked outbox row to `<gateway_url>/inbox`, marking each acked on
+    /// success. Stops at the first failure (rows stay queued for the next flush). Returns count sent.
+    pub async fn flush_outbox(&self, gateway_url: &str) -> Result<u64> {
+        let (_db, conn) = self.open_outbox().await?;
+        let src = &self.cfg.node.db;
+
+        let mut pending: Vec<(i64, String)> = Vec::new();
+        {
+            let mut rows = conn
+                .query("SELECT seq, payload FROM outbox WHERE acked = 0 ORDER BY seq ASC LIMIT 1000", ())
+                .await?;
+            while let Some(r) = rows.next().await? {
+                let seq = match r.get_value(0)? {
+                    Value::Integer(i) => i,
+                    _ => continue,
+                };
+                let payload = match r.get_value(1)? {
+                    Value::Text(s) => s.to_string(),
+                    _ => String::new(),
+                };
+                pending.push((seq, payload));
+            }
+        }
+
+        let base = gateway_url.trim_end_matches('/');
+        let mut sent = 0u64;
+        for (seq, payload) in pending {
+            let body = json!({
+                "id": format!("{src}-{seq}"),
+                "src": src,
+                "payload": serde_json::from_str::<J>(&payload).unwrap_or(J::String(payload.clone())),
+            });
+            let ok = self
+                .client
+                .post(format!("{base}/inbox"))
+                .json(&body)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .is_ok();
+            if !ok {
+                break; // leave this and later rows queued for the next flush
+            }
+            conn.execute("UPDATE outbox SET acked = 1 WHERE seq = ?1", (seq,)).await?;
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    /// Master: land one write-back row into `inbox` (replicates out to edges on the next push).
+    pub async fn ingest_inbox(&self, id: &str, src: &str, payload: &J) -> Result<()> {
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO inbox VALUES (?1, ?2, ?3, ?4)",
+                vec![
+                    Value::Text(id.to_string()),
+                    Value::Integer(now_ts()),
+                    Value::Text(src.to_string()),
+                    Value::Text(payload.to_string()),
+                ],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Convenience: a small trends summary over the drained DuckDB (counts + by-source if meta

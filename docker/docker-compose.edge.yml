@@ -1,23 +1,18 @@
-# Mac edge: run RAG queries against the replicated edge db, pulling from the PC's sync hub.
+# Mac edge: run search/RAG queries against the replicated edge db, pulling from the PC's sync hub.
 # Set PC_IP to the PC's Tailscale/LAN IP, then:
-#   PC_IP=100.x.y.z docker compose -f docker/docker-compose.edge.yml run --rm rag \
-#       rag "what are the recent edits about science?" 5
+#   PC_IP=100.x.y.z docker compose -f docker/docker-compose.edge.yml run --rm edge \
+#       search "what are the recent edits about science?" 5 --config configs/replica.docker.toml
 #
+# CASCADE_REMOTE_URL overrides sync.remote_url in the config, so the committed toml stays generic.
 # Ollama runs on the Mac host (Metal); the container reaches it at host.docker.internal:11434.
 
 services:
-  rag:
+  edge:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      LAB_SYNC: "1"
-      TURSO_REMOTE_URL: "http://${PC_IP:?set PC_IP to the PC sync-server ip}:8080"
-      LAB_DB: "/work/.work/db/lab_edge.db"
-      EMBED_MODEL: "all-minilm"
-      EMBED_DIM: "384"
-      GEN_MODEL: "qwen2.5:1.5b"
-      OLLAMA_URL: "http://host.docker.internal:11434"
+      CASCADE_REMOTE_URL: "http://${PC_IP:?set PC_IP to the PC sync-server ip}:8080"
     volumes:
       - ../.work:/work/.work
     extra_hosts:
